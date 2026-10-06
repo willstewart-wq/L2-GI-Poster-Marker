@@ -1,0 +1,253 @@
+import streamlit as st
+import json
+import base64
+import openai
+from pypdf import PdfReader
+from PIL import Image
+import io
+
+# ==========================================
+# 1. RUBRIC SPECIFICATIONS & CRITERIA
+# ==========================================
+RUBRICS = {
+    "Poster 1: Healthy Lifestyles": {
+        "max_pages": 2,
+        "general_requirements": [
+            "Maximum of two sides of A4 paper",
+            "Short sentences and bullet points",
+            "Appropriate language and images included",
+            "Credible evidence-based information with references"
+        ],
+        "criteria": [
+            {"id": 1, "title": "WHO Definition of Health", "desc": "Official World Health Organization definition of health."},
+            {"id": 2, "title": "UK Population Health & Prevalence", "desc": "Prevalence and health implications for the UK population."},
+            {"id": 3, "title": "Components of Total Fitness", "desc": "Overview of the components of total fitness."},
+            {"id": 4, "title": "Healthy Lifestyle Behaviours", "desc": "Covers non-smoking, responsible alcohol, healthy eating, physical activity, sleep, and managing stress."},
+            {"id": 5, "title": "Unhealthy Behaviours & Health Risks", "desc": "Chronic health conditions linked with unhealthy lifestyle choices."},
+            {"id": 6, "title": "Credible Information Sources", "desc": "Official sources for support (e.g., NHS, government, health foundations)."},
+            {"id": 7, "title": "Supporting Health Professionals", "desc": "List of professionals to support lifestyle (e.g., Physiotherapist, Nutritionist, Sports Massage Therapist)."}
+        ]
+    },
+    "Poster 2: The Benefits of Physical Activity": {
+        "max_pages": 2,
+        "general_requirements": [
+            "Maximum of two sides of A4 paper",
+            "Short sentences and bullet points",
+            "Appropriate language and images included",
+            "Credible evidence-based information with references"
+        ],
+        "criteria": [
+            {"id": 1, "title": "CMO Physical Activity Guidelines", "desc": "Outline of Chief Medical Officer guidelines for adults."},
+            {"id": 2, "title": "Health Benefits of Regular Activity", "desc": "Summary of health benefits of regular exercise and physical activity."},
+            {"id": 3, "title": "Preventing Chronic Health Conditions", "desc": "Role of physical activity in preventing chronic health conditions."},
+            {"id": 4, "title": "Barriers & Overcoming Them", "desc": "Potential barriers to physical activity and practical solutions."},
+            {"id": 5, "title": "Types of Exercise & Benefits", "desc": "Overview of different exercise types and their specific benefits."},
+            {"id": 6, "title": "Fitness vs Health Recommendations", "desc": "Differences between activity for physical fitness vs health promotion."},
+            {"id": 7, "title": "Deferring Exercise Reasons", "desc": "Reasons for temporarily deferring exercise."},
+            {"id": 8, "title": "Specialist Guidance & Support", "desc": "When to seek specialist guidance and appropriate referral sources."}
+        ]
+    },
+    "Poster 3: Healthy Eating": {
+        "max_pages": 2,
+        "general_requirements": [
+            "Maximum of two sides of A4 paper",
+            "Short sentences and bullet points",
+            "Appropriate language and images included",
+            "Credible evidence-based information with references"
+        ],
+        "criteria": [
+            {"id": 1, "title": "Eatwell Guide Recommendations", "desc": "Overview of the UK Eatwell guide recommendations."},
+            {"id": 2, "title": "Health Benefits of Healthy Eating", "desc": "Summary of health benefits and importance of healthy eating."},
+            {"id": 3, "title": "Risks of Unhealthy Eating", "desc": "Risks and consequences associated with unhealthy eating."},
+            {"id": 4, "title": "Healthy Eating Swaps", "desc": "Practical suggestions for making healthy food swaps."},
+            {"id": 5, "title": "Main Nutrients & Food Sources", "desc": "Key nutrients and example food sources for each."},
+            {"id": 6, "title": "Importance of Hydration", "desc": "The importance of adequate hydration for health."},
+            {"id": 7, "title": "Dietitian Referrals", "desc": "Specific individuals who should speak to a dietitian for support."},
+            {"id": 8, "title": "Credible Nutrition Sources", "desc": "Credible evidence-based sources for healthy eating and nutrition."}
+        ]
+    }
+}
+
+# ==========================================
+# 2. FILE EXTRACTION UTILITIES
+# ==========================================
+def extract_document_content(uploaded_file):
+    """Extracts text, page count, and image data from uploaded files."""
+    file_type = uploaded_file.name.split(".")[-1].lower()
+    text = ""
+    page_count = 1
+    image_bytes_list = []
+
+    if file_type == "pdf":
+        reader = PdfReader(uploaded_file)
+        page_count = len(reader.pages)
+        for idx, page in enumerate(reader.pages):
+            text += f"\n--- Page {idx + 1} ---\n" + (page.extract_text() or "")
+            for img in page.images:
+                image_bytes_list.append(img.data)
+    elif file_type in ["png", "jpg", "jpeg"]:
+        page_count = 1
+        img_data = uploaded_file.read()
+        image_bytes_list.append(img_data)
+        text = "[Image submission loaded for vision evaluation]"
+
+    return {
+        "text": text,
+        "page_count": page_count,
+        "image_count": len(image_bytes_list),
+        "images": image_bytes_list
+    }
+
+# ==========================================
+# 3. AI EVALUATION ENGINE
+# ==========================================
+def mark_submission(api_key, poster_title, rubric, parsed_doc):
+    client = openai.OpenAI(api_key=api_key)
+
+    prompt = f"""
+    You are an expert assessor marking student poster submissions for fitness qualifications.
+    
+    ASSIGNMENT: "{poster_title}"
+    
+    PAGE CONSTRAINT: Maximum 2 sides of A4 allowed.
+    DETECTED PAGE COUNT: {parsed_doc['page_count']} page(s).
+    IMAGES DETECTED: {parsed_doc['image_count']} image(s).
+    
+    REQUIRED CRITERIA TO MARK AGAINST:
+    {json.dumps(rubric['criteria'], indent=2)}
+    
+    EXTRACTED TEXT FROM WORK:
+    {parsed_doc['text']}
+    
+    INSTRUCTIONS:
+    1. Check if the work is within the 2-page A4 limit.
+    2. Check if relevant images and bullet points/concise formatting are used.
+    3. Evaluate each numbered criterion as "Met", "Partially Met", or "Not Met".
+    4. Provide clear evidence from the text for what HAS been met.
+    5. Provide specific, actionable guidance on WHAT STILL NEEDS TO BE DONE.
+    
+    Return strict JSON matching this structure ONLY:
+    {{
+        "page_limit_met": true/false,
+        "has_images": true/false,
+        "has_references": true/false,
+        "formatting_notes": "Brief comment on page count, concise bulleted style, and images.",
+        "evaluations": [
+            {{
+                "id": 1,
+                "title": "Criterion Title",
+                "status": "Met" | "Partially Met" | "Not Met",
+                "evidence_met": "Quote or summary of what student completed.",
+                "action_needed": "What still needs to be done to meet the criteria."
+            }}
+        ],
+        "overall_summary": "Encouraging summary highlighting strengths and missing requirements."
+    }}
+    """
+
+    messages = [{"role": "system", "content": "You are a professional assessor. Output strictly valid JSON."},
+                {"role": "user", "content": prompt}]
+
+    # Include first image if provided for visual verification
+    if parsed_doc["images"]:
+        b64_img = base64.b64encode(parsed_doc["images"][0]).decode("utf-8")
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Student poster page preview:"},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_img}"}}
+            ]
+        })
+
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=messages,
+        response_format={"type": "json_object"},
+        temperature=0.1
+    )
+    return json.loads(response.choices[0].message.content)
+
+# ==========================================
+# 4. STREAMLIT USER INTERFACE
+# ==========================================
+st.set_page_config(page_title="Student Work Marking App", page_icon="📝", layout="wide")
+
+st.title("📝 Student Poster Marking Application")
+st.markdown("Upload student work (PDF, PNG, JPG) to mark it automatically against course criteria.")
+
+# Sidebar Configuration
+st.sidebar.header("⚙️ Settings")
+
+# Check Streamlit secrets first, or allow manual entry
+api_key = st.secrets.get("OPENAI_API_KEY", "")
+if not api_key:
+    api_key = st.sidebar.text_input("Enter OpenAI API Key", type="password")
+
+selected_poster = st.sidebar.selectbox("Select Poster Assignment", list(RUBRICS.keys()))
+rubric = RUBRICS[selected_poster]
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("📋 Required Criteria")
+for c in rubric["criteria"]:
+    st.sidebar.write(f"**{c['id']}. {c['title']}**")
+
+# Upload File Section
+uploaded_file = st.file_uploader("Upload Student Document (PDF or Image)", type=["pdf", "png", "jpg", "jpeg"])
+
+if uploaded_file:
+    st.success(f"File uploaded: **{uploaded_file.name}**")
+    
+    if st.button("🚀 Mark Student Work", type="primary"):
+        if not api_key:
+            st.error("Please enter an OpenAI API Key in the sidebar (or configure secrets).")
+        else:
+            with st.spinner("Analyzing document structure, images, and content..."):
+                parsed_doc = extract_document_content(uploaded_file)
+                result = mark_submission(api_key, selected_poster, rubric, parsed_doc)
+                
+                st.markdown("---")
+                st.header("📊 Assessment Results Overview")
+
+                # Metrics Header
+                m1, m2, m3 = st.columns(3)
+                with m1:
+                    if result.get("page_limit_met") and parsed_doc["page_count"] <= 2:
+                        st.success(f"📄 Page Limit: {parsed_doc['page_count']} / 2 Sides (Met)")
+                    else:
+                        st.error(f"📄 Page Limit: {parsed_doc['page_count']} / 2 Sides (Exceeded)")
+                with m2:
+                    if result.get("has_images") or parsed_doc["image_count"] > 0:
+                        st.success(f"🖼️ Images Included ({parsed_doc['image_count']} found)")
+                    else:
+                        st.warning("🖼️ No Images Detected")
+                with m3:
+                    if result.get("has_references"):
+                        st.success("📚 References Found")
+                    else:
+                        st.error("📚 References Missing")
+
+                st.info(f"**Formatting & Layout Feedback:** {result.get('formatting_notes', '')}")
+
+                # Criteria Breakdown Table
+                st.subheader("🎯 Criteria Completion Checklist")
+                
+                evals = result.get("evaluations", [])
+                met_cnt = sum(1 for e in evals if e["status"] == "Met")
+                st.progress(met_cnt / len(evals) if evals else 0, text=f"Met {met_cnt} of {len(evals)} required criteria")
+
+                for item in evals:
+                    status = item["status"]
+                    icon = "✅" if status == "Met" else ("⚠️" if status == "Partially Met" else "❌")
+                    
+                    with st.expander(f"{icon} **Criterion {item['id']}: {item['title']}** — *{status}*"):
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            st.markdown("**What Has Been Met:**")
+                            st.write(item.get("evidence_met", "None found."))
+                        with c2:
+                            st.markdown("**What Still Needs To Be Done:**")
+                            st.write(item.get("action_needed", "Complete."))
+
+                # Overall Action Plan
+                st.subheader("📝 Summary & Next Steps for Student")
+                st.success(result.get("overall_summary", "Evaluation complete."))
